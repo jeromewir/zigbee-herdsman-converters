@@ -2,14 +2,72 @@ import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
 import {describe, expect, it, vi} from "vitest";
+import {Zcl} from "zigbee-herdsman";
 import baseDefinitions from "../src/devices/index";
-import {addExternalDefinition, findByDevice, postProcessConvertedFromZigbeeMessage, removeExternalDefinitions} from "../src/index";
+import {addExternalDefinition, findByDevice, onEvent, postProcessConvertedFromZigbeeMessage, removeExternalDefinitions} from "../src/index";
 import {access, Composite, Enum, List, Numeric, presets} from "../src/lib/exposes";
 import {mockDevice} from "./utils";
 
 describe("ZHC", () => {
     // TODO: generateExternalDefinition
-    // TODO: onEvent
+
+    it("responds with the coordinator model identifier expected by Intuis radiators", async () => {
+        const device = mockDevice(
+            {
+                modelID: "",
+                manufacturerID: 0x122e,
+                endpoints: [{ID: 1}],
+            },
+            "Unknown",
+        );
+        await onEvent({type: "deviceJoined", data: {device}});
+
+        const endpoint = device.getEndpoint(1);
+        const readResponse = vi.spyOn(endpoint, "readResponse").mockResolvedValue(undefined);
+        const readFrame = (attrIds: number[], cluster = "genBasic") =>
+            Zcl.Frame.create(
+                Zcl.FrameType.GLOBAL,
+                Zcl.Direction.CLIENT_TO_SERVER,
+                true,
+                undefined,
+                42,
+                "read",
+                cluster,
+                attrIds.map((attrId) => ({attrId})),
+                {},
+            );
+
+        expect(device.customReadResponse(readFrame([0x0005]), endpoint)).toBe(true);
+        expect(device.customReadResponse(readFrame([0x0004]), endpoint)).toBe(false);
+        expect(device.customReadResponse(readFrame([0x0005], "genTime"), endpoint)).toBe(false);
+        expect(readResponse).toHaveBeenCalledOnce();
+        expect(readResponse).toHaveBeenCalledWith("genBasic", 42, {modelId: ` Radiator Module${"\0".repeat(15)}`});
+
+        expect(device.customReadResponse(readFrame([0x0005, 0x0000, 0xffff]), endpoint)).toBe(true);
+        expect(readResponse).toHaveBeenLastCalledWith("genBasic", 42, {
+            modelId: ` Radiator Module${"\0".repeat(15)}`,
+            0: {value: Zcl.Clusters.genBasic.attributes.zclVersion.default, type: Zcl.DataType.UINT8},
+            65535: {value: undefined, type: Zcl.DataType.NO_DATA},
+        });
+
+        device.modelID = "another-model";
+        expect(device.customReadResponse(readFrame([0x0005]), endpoint)).toBe(false);
+        expect(readResponse).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not install the Intuis read response for a different manufacturer", async () => {
+        const device = mockDevice({modelID: "intuisradiator                 ", manufacturerID: 0x1234, endpoints: [{ID: 1}]});
+        await onEvent({type: "deviceJoined", data: {device}});
+        expect(device.customReadResponse).toBeUndefined();
+    });
+
+    it("preserves an existing custom read response", async () => {
+        const device = mockDevice({modelID: "", manufacturerID: 0x122e, endpoints: [{ID: 1}]});
+        const customReadResponse = vi.fn(() => false);
+        device.customReadResponse = customReadResponse;
+        await onEvent({type: "deviceJoined", data: {device}});
+        expect(device.customReadResponse).toBe(customReadResponse);
+    });
 
     it("cannot find definition without enough data points", async () => {
         const device = mockDevice(

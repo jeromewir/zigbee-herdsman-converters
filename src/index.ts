@@ -1,5 +1,6 @@
 import assert from "node:assert";
 import {Zcl} from "zigbee-herdsman";
+import type {RawClusterAttributes} from "zigbee-herdsman/dist/controller/tstype";
 import type {TFoundationPayload} from "zigbee-herdsman/dist/zspec/zcl/definition/clusters-types";
 import * as fromZigbee from "./converters/fromZigbee";
 import * as toZigbee from "./converters/toZigbee";
@@ -688,6 +689,27 @@ export function onEvent(event: OnEvent.Event): Promise<void> {
                     // XXX: we're replying to specific attribute, which could be incorrect (not based on the request attrIds)
                     endpoint.readResponse("genTime", frame.header.transactionSequenceNumber, {time: secondsLocal}).catch((e) => {
                         logger.warning(`ZNCWWSQ01LM custom time response failed: ${e}`, NS);
+                    });
+
+                    return true;
+                }
+
+                return false;
+            };
+        } else if (device.manufacturerID === Zcl.ManufacturerCode.GROUPE_MULLER) {
+            // Intuis radiators validate the coordinator model identifier before continuing their interview.
+            device.customReadResponse = (frame, endpoint) => {
+                if (device.modelID && device.modelID.trim() !== "intuisradiator") return false;
+                if (frame.isCluster("genBasic") && (frame.payload as TFoundationPayload<"read">).some((i) => i.attrId === 0x0005)) {
+                    const response: RawClusterAttributes & {modelId: string} = {modelId: ` Radiator Module${"\0".repeat(15)}`};
+                    // Claiming this request also suppresses the default response for its other attributes.
+                    for (const {attrId} of frame.payload as TFoundationPayload<"read">) {
+                        if (attrId === 0x0005) continue;
+                        const attribute = Zcl.Utils.getClusterAttribute(frame.cluster, attrId, device.manufacturerID);
+                        response[attrId] = {value: attribute?.default, type: attribute?.type ?? Zcl.DataType.NO_DATA};
+                    }
+                    endpoint.readResponse("genBasic", frame.header.transactionSequenceNumber, response).catch((e) => {
+                        logger.warning(`Intuis coordinator model identifier response failed: ${e}`, NS);
                     });
 
                     return true;
